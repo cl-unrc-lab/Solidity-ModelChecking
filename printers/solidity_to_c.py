@@ -97,6 +97,15 @@ class SolidityToCPrinter(Printer):
     def visit_if_statement(self, node: ir.IfStatement):
         self._pending.append(node)
 
+    def visit_while_statement(self, node: ir.WhileStatement):
+        self._pending.append(node)
+
+    def visit_do_while_statement(self, node: ir.DoWhileStatement):
+        self._pending.append(node)
+
+    def visit_for_statement(self, node: ir.ForStatement):
+        self._pending.append(node)
+
     def visit_literal(self, node: ir.Literal):
         self._pending.append(node)
 
@@ -179,6 +188,35 @@ class SolidityToCPrinter(Printer):
         if node.false_body is not None:
             out.append("} else {")
             out += [INDENT + l for l in self._lines(node.false_body)]
+        out.append("}\n")
+        return out
+
+    def _tr_WhileStatement(self, node: ir.WhileStatement) -> List[str]:
+        out: List[str] = [f"while ({self._txt(node.condition)}) {{"]
+        out += [INDENT + l for l in self._lines(node.body)]
+        out.append("}\n")
+        return out
+
+    def _tr_DoWhileStatement(self, node: ir.DoWhileStatement) -> List[str]:
+        out: List[str] = ["do {"]
+        out += [INDENT + l for l in self._lines(node.body)]
+        out.append(f"}} while ({self._txt(node.condition)});\n")
+        return out
+
+    def _inline(self, node) -> str:
+        # Sentencia en una línea, sin ';' final (para la cabecera del for).
+        if node is None:
+            return ""
+        return " ".join(self._lines(node)).rstrip(";")
+
+    def _tr_ForStatement(self, node: ir.ForStatement) -> List[str]:
+        init = self._inline(node.initialization_expression)
+        cond = self._txt(node.condition) if node.condition is not None else ""
+        step = self._inline(node.loop_expression)
+
+        out: List[str] = [f"for ({init}; {cond}; {step}) {{"]
+        if node.body is not None:
+            out += [INDENT + l for l in self._lines(node.body)]
         out.append("}")
         return out
 

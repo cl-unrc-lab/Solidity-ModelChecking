@@ -17,5 +17,21 @@ contract Bank {
 
       }
     }
+
+    while (c==2) {
+      if (c<=2) {
+        while(c==2) {}
+      } else { c--;}
+    }
+
+    do {
+      c++;
+    } while (c == 2);
+
+    for (int i = 0; i<10; i++) {
+      c++;
+    }
+
+    for (;;) {}
   }
 }
