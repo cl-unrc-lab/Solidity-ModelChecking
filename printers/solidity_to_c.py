@@ -94,6 +94,9 @@ class SolidityToCPrinter(Printer):
     def visit_expression_statement(self, node: ir.ExpressionStatement):
         self._pending.append(node)
 
+    def visit_if_statement(self, node: ir.IfStatement):
+        self._pending.append(node)
+
     def visit_literal(self, node: ir.Literal):
         self._pending.append(node)
 
@@ -168,6 +171,15 @@ class SolidityToCPrinter(Printer):
         out = [f"{self._decl(d)};" for d in decls]
         if node.initial_value is not None:
             out.append(f"/* TODO tupla: {node.source} */")
+        return out
+
+    def _tr_IfStatement(self, node: ir.IfStatement) -> List[str]:
+        out: List[str] = [f"if ({self._txt(node.condition)}) {{"]
+        out += [INDENT + l for l in self._lines(node.true_body)]
+        if node.false_body is not None:
+            out.append("} else {")
+            out += [INDENT + l for l in self._lines(node.false_body)]
+        out.append("}")
         return out
 
     def _tr_Block(self, node: ir.Block) -> List[str]:
