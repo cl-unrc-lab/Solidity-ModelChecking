@@ -106,6 +106,9 @@ class SolidityToCPrinter(Printer):
     def visit_binary_operation(self, node: ir.BinaryOperation):
         self._pending.append(node)
 
+    def visit_unary_operation(self, node: ir.UnaryOperation):
+        self._pending.append(node)
+
     # Funciones auxiliares que manipulan el código ya traducido
 
     def _txt(self, node) -> str:
@@ -140,6 +143,17 @@ class SolidityToCPrinter(Printer):
         if node.operator == ir.enums.BinaryOpOperator.EXP:
             return f"ipow({left}, {right})"
         return f"{left} {node.operator.value} {right}"
+
+    def _tr_UnaryOperation(self, node: ir.UnaryOperation) -> str:
+        sub_expr = self._txt(node.sub_expression)
+        match node.operator:
+            case ir.enums.UnaryOpOperator.DELETE:
+                return f"TODO {node.operator.value}"
+            case ir.enums.UnaryOpOperator.TILDE:
+                return f"TODO {node.operator.value}"
+        if not node.prefix:
+            return f"{sub_expr}{node.operator.value}"
+        return f"{node.operator.value}{sub_expr}"
 
     def _tr_ExpressionStatement(self, node: ir.ExpressionStatement) -> List[str]:
         return [f"{self._txt(node.expression)};"]

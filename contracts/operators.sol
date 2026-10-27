@@ -40,5 +40,12 @@ contract Bank {
     c >>= 2;
     c *= 2;
     c ^= 2;
+
+    //Unarios 
+    b = !b;
+    c++;
+    c--;
+    ++c;
+    --c;
   }
 }
