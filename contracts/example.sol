@@ -4,6 +4,6 @@ contract Bank {
   int balance = 2;
 
   function funcion(int direccion) public returns (int a, int b) {
-    
+    int c = 2;
   }
 }
