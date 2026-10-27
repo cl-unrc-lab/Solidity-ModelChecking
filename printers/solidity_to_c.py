@@ -106,6 +106,12 @@ class SolidityToCPrinter(Printer):
     def visit_for_statement(self, node: ir.ForStatement):
         self._pending.append(node)
 
+    def visit_break(self, node: ir.Break):
+        self._pending.append(node)
+
+    def visit_continue(self, node: ir.Continue):
+        self._pending.append(node)
+
     def visit_literal(self, node: ir.Literal):
         self._pending.append(node)
 
@@ -131,6 +137,9 @@ class SolidityToCPrinter(Printer):
  
     def _decl(self, v: ir.VariableDeclaration) -> str:
         return f"{c_type(v.type_string)} {v.name}"
+
+    def _ret_decl(self, v: ir.VariableDeclaration) -> str:
+        return f"{c_type(v.type_string)} *{v.name}"
 
     # Traducción de expresiones, sentencias y definiciones
     # Se traduce todo lo que queda pendiente, ya sea en pending, contracts o functions 
@@ -220,6 +229,12 @@ class SolidityToCPrinter(Printer):
         out.append("}")
         return out
 
+    def _tr_Break(self, node: ir.Break) -> List[str]:
+        return ["break;"]
+
+    def _tr_Continue(self, node: ir.Continue) -> List[str]:
+        return ["continue;"]
+
     def _tr_Block(self, node: ir.Block) -> List[str]:
         out: List[str] = []
         for s in node.statements:
@@ -245,7 +260,7 @@ class SolidityToCPrinter(Printer):
 
         ret_type = "void"
  
-        params = [f"{contract.name} *self"] + [self._decl(p) for p in node.parameters.parameters] + [self._decl(r) for r in rets]
+        params = [f"{contract.name} *self"] + [self._decl(p) for p in node.parameters.parameters] + [self._ret_decl(r) for r in rets]
         out.append(f"{ret_type} {fname}({', '.join(params)}) {{")
         if node.implemented and node.body is not None:
             out += [INDENT + l for l in self._lines(node.body)]
