@@ -94,6 +94,9 @@ class SolidityToCPrinter(Printer):
     def visit_expression_statement(self, node: ir.ExpressionStatement):
         self._pending.append(node)
 
+    def visit_return(self, node: ir.Return):
+        self._pending.append(node)
+
     def visit_if_statement(self, node: ir.IfStatement):
         self._pending.append(node)
 
@@ -138,8 +141,30 @@ class SolidityToCPrinter(Printer):
     def _decl(self, v: ir.VariableDeclaration) -> str:
         return f"{c_type(v.type_string)} {v.name}"
 
-    def _ret_decl(self, v: ir.VariableDeclaration) -> str:
-        return f"{c_type(v.type_string)} *{v.name}"
+    def _return_owner(self, v: ir.VariableDeclaration):
+        plist = v.parent
+        fn = plist.parent if plist is not None else None
+        if isinstance(fn, ir.FunctionDefinition) and plist is fn.return_parameters:
+            return fn
+        return None
+
+    def _enclosing_function(self, node):
+        while node is not None and not isinstance(node, ir.FunctionDefinition):
+            node = node.parent
+        return node
+
+    def _always_returns(self, node) -> bool:
+        if isinstance(node, ir.Return):
+            return True
+        if isinstance(node, ir.Block):
+            return any(self._always_returns(s) for s in node.statements)
+        if isinstance(node, ir.IfStatement):
+            return (
+                node.false_body is not None
+                and self._always_returns(node.true_body)
+                and self._always_returns(node.false_body)
+            )
+        return False
 
     # Traducción de expresiones, sentencias y definiciones
     # Se traduce todo lo que queda pendiente, ya sea en pending, contracts o functions 
@@ -149,8 +174,12 @@ class SolidityToCPrinter(Printer):
 
     def _tr_Identifier(self, node: ir.Identifier) -> str:
         ref = node.referenced_declaration
-        if isinstance(ref, ir.VariableDeclaration) and ref.is_state_variable:
-            return f"self->{node.name}"
+        if isinstance(ref, ir.VariableDeclaration):
+            if ref.is_state_variable:
+                return f"self->{node.name}"
+            fn = self._return_owner(ref)
+            if fn is not None and len(fn.return_parameters.parameters) >= 2:
+                return f"_ret.{node.name}"
         return node.name
 
     def _tr_Assignment(self, node: ir.Assignment) -> str:
@@ -190,6 +219,29 @@ class SolidityToCPrinter(Printer):
         if node.initial_value is not None:
             out.append(f"/* TODO tupla: {node.source} */")
         return out
+
+    def _tr_Return(self, node: ir.Return) -> List[str]:
+        fn = self._enclosing_function(node)
+        rets = fn.return_parameters.parameters
+        ret_type = f"ret_{fn.parent.name}_{fn.name}"
+
+        if len(rets) == 0:
+            return ["return;"]
+
+        if node.expression is None:                      # "return;"
+            if len(rets) >= 2:
+                return ["return _ret;"]
+            return [f"return {rets[0].name or '0'};"]
+
+        if len(rets) == 1:                               # "return x;"
+            return [f"return {self._txt(node.expression)};"]
+
+        exprs = node.expression.components               # "return (a, b);"
+        fields = ", ".join(
+            f".{self._ret_name(r, i)} = {self._txt(e)}"
+            for i, (r, e) in enumerate(zip(rets, exprs))
+        )
+        return [f"return ({ret_type}){{ {fields} }};"]
 
     def _tr_IfStatement(self, node: ir.IfStatement) -> List[str]:
         out: List[str] = [f"if ({self._txt(node.condition)}) {{"]
@@ -247,23 +299,54 @@ class SolidityToCPrinter(Printer):
         out.append(f"}} {node.name};\n")
         return out
  
+    def _ret_name(self, r: ir.VariableDeclaration, i: int) -> str:
+        return r.name if r.name else f"_{i}"
+
     def _tr_FunctionDefinition(self, node: ir.FunctionDefinition) -> List[str]:
         contract = node.parent
         if node.kind != ir.enums.FunctionKind.FUNCTION:
-            return []  # TODO: constructor, fallback, receive
+            return []
         if not isinstance(contract, ir.ContractDefinition):
-            return 
+            return []
 
         fname = f"{contract.name}_{node.name}"
-        out: List[str] = []
         rets = node.return_parameters.parameters
+        out: List[str] = []
 
-        ret_type = "void"
- 
-        params = [f"{contract.name} *self"] + [self._decl(p) for p in node.parameters.parameters] + [self._ret_decl(r) for r in rets]
+        if len(rets) == 0:
+            ret_type = "void"
+        elif len(rets) == 1:
+            ret_type = c_type(rets[0].type_string)
+        else:
+            ret_type = f"ret_{fname}"
+            out.append(f"typedef struct {ret_type} {{")
+            out += [f"{INDENT}{c_type(r.type_string)} {self._ret_name(r, i)};"
+                    for i, r in enumerate(rets)]
+            out.append(f"}} {ret_type};\n")
+
+        params = [f"{contract.name} *self"] + [self._decl(p) for p in node.parameters.parameters]
         out.append(f"{ret_type} {fname}({', '.join(params)}) {{")
+
+        # Prólogo: retornos con nombre = locales con valor por defecto
+        if len(rets) == 1 and rets[0].name:
+            out.append(f"{INDENT}{ret_type} {rets[0].name} = 0;")
+        elif len(rets) >= 2:
+            out.append(f"{INDENT}{ret_type} _ret = {{0}};")
+
         if node.implemented and node.body is not None:
             out += [INDENT + l for l in self._lines(node.body)]
+            falls_through = not self._always_returns(node.body)
+        else:
+            falls_through = True 
+
+        # Epílogo: si el cuerpo termina sin return, se devuelve lo acumulado
+
+        if falls_through:
+            if len(rets) == 1 and rets[0].name:
+                out.append(f"{INDENT}return {rets[0].name};")
+            elif len(rets) >= 2:
+                out.append(f"{INDENT}return _ret;")
+
         out.append("}\n")
         return out
 
