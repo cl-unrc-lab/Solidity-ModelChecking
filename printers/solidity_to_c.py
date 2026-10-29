@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from os import error
+from os.path import join
 from pathlib import Path
 from typing import Dict, List
 
@@ -63,6 +64,8 @@ class SolidityToCPrinter(Printer):
         self._pending : List = []
         self._contracts : List[ir.ContractDefinition] = []
         self._functions : Dict[int, List[ir.FunctionDefinition]] = defaultdict(list)
+        self._functions_sol_c : Dict[str, str] = {}
+        self._functions_definition : List = []
         self._memo : Dict[int, object] = {}
 
     # ------------------------------------------------------------------
@@ -84,6 +87,8 @@ class SolidityToCPrinter(Printer):
         parent = node.parent
         if isinstance(parent, ir.ContractDefinition):
             self._functions[id(parent)].append(node)
+            self._functions_definition.append(node)
+            self._functions_sol_c[node.name] = f"{parent.name}_{node.name}"
 
     def visit_block(self, node: ir.Block):
         self._pending.append(node)
@@ -119,6 +124,12 @@ class SolidityToCPrinter(Printer):
         self._pending.append(node)
 
     def visit_identifier(self, node: ir.Identifier):
+        self._pending.append(node)
+
+    def visit_tuple_expression(self, node: ir.TupleExpression):
+        self._pending.append(node)
+
+    def visit_function_call(self, node: ir.FunctionCall):
         self._pending.append(node)
 
     def visit_assignment(self, node: ir.Assignment):
@@ -166,6 +177,67 @@ class SolidityToCPrinter(Printer):
             )
         return False
 
+    def _tuple_assign(self, assign: ir.Assignment) -> List[str]:
+        # (a, , c) = ...   -> destinos: (texto_c, type_string) o None por cada hueco
+        targets = [
+            None if c is None else (self._txt(c), c.type_string)
+            for c in assign.left_expression.components
+        ]
+        return self._tuple_distribute(targets, assign.right_expression, assign.source)
+
+    def _tuple_distribute(self, targets, rgt, source: str) -> List[str]:
+        """Evalúa el lado derecho completo y luego reparte a los destinos.
+        Devuelve UNA LÍNEA POR ELEMENTO, ya con la indentación interna del bloque,
+        para que el padre pueda indentar todo con INDENT + línea."""
+        # (x, y) = (y, x)   |   (x, y) = (2, 3)
+        if (
+            isinstance(rgt, ir.TupleExpression)
+            and not rgt.is_inline_array
+            and len(targets) > 1
+            and len(rgt.components) == len(targets)
+        ):
+            body: List[str] = []
+            for i, (t, src) in enumerate(zip(targets, rgt.components)):
+                if src is None:
+                    continue
+                if t is None:
+                    body.append(f"(void)({self._txt(src)});")   # se evalúa, no se guarda
+                else:
+                    body.append(f"{c_type(t[1])} _t{i} = {self._txt(src)};")
+            for i, t in enumerate(targets):
+                if t is not None:
+                    body.append(f"{t[0]} = _t{i};")
+            return ["{"] + [INDENT + l for l in body] + ["}"]
+
+        # (a, b) = f(...)
+        if isinstance(rgt, ir.FunctionCall):
+            fn = rgt.function_called
+
+            # Solo funciones de contrato llamadas por nombre (llamada interna)
+            if (
+                not isinstance(fn, ir.FunctionDefinition)
+                or not isinstance(fn.parent, ir.ContractDefinition)
+                or fn.kind != ir.enums.FunctionKind.FUNCTION
+                or not isinstance(rgt.expression, ir.Identifier)
+            ):
+                return [f"/* TODO tupla = llamada no soportada: {source} */"]
+
+            rets = fn.return_parameters.parameters
+            if len(rets) < 2 or len(rets) != len(targets):
+                return [f"/* TODO tupla: cantidad de retornos no coincide: {source} */"]
+
+            fname = f"{fn.parent.name}_{fn.name}"      # igual que en _tr_FunctionDefinition
+            ret_type = f"ret_{fname}"
+            args = ", ".join(["self"] + [self._txt(a) for a in rgt.arguments])
+
+            body = [f"{ret_type} _r = {fname}({args});"]
+            for i, (t, r) in enumerate(zip(targets, rets)):
+                if t is not None:
+                    body.append(f"{t[0]} = _r.{self._ret_name(r, i)};")
+            return ["{"] + [INDENT + l for l in body] + ["}"]
+
+        return [f"/* TODO tupla: {source} */"]
+
     # Traducción de expresiones, sentencias y definiciones
     # Se traduce todo lo que queda pendiente, ya sea en pending, contracts o functions 
     def _tr_Literal(self, node: ir.Literal) -> str:
@@ -180,12 +252,39 @@ class SolidityToCPrinter(Printer):
             fn = self._return_owner(ref)
             if fn is not None and len(fn.return_parameters.parameters) >= 2:
                 return f"_ret.{node.name}"
+        elif isinstance(ref, ir.FunctionDefinition):
+            return self._functions_sol_c[node.name]
         return node.name
 
     def _tr_Assignment(self, node: ir.Assignment) -> str:
-        left = self._txt(node.left_expression)
-        right = self._txt(node.right_expression)
-        return f"{left} {node.operator.value} {right}"
+        # Detectar asignación de tuplas: (a, b) = ...
+        left = node.left_expression
+        right = node.right_expression
+
+        if isinstance(left, ir.TupleExpression):
+            # Una asignación de tupla produce varias líneas: la resuelve la sentencia
+            # (_tr_ExpressionStatement), no la expresión.
+            return f"/* TODO asignación de tupla fuera de una sentencia: {node.source} */"
+
+        l_txt = self._txt(left)
+        r_txt = self._txt(right)
+        return f"{l_txt} {node.operator.value} {r_txt}"
+
+    def _tr_FunctionCall(self, node: ir.FunctionCall) -> str:
+        match node.kind:
+            case ir.enums.FunctionCallKind.FUNCTION_CALL:
+                args = ", ".join(self._txt(a) for a in node.arguments if a is not None)
+                return f"{self._txt(node.expression)}({args})"
+            case _:
+                return "TODO"
+
+    def _tr_TupleExpression(self, node: ir.TupleExpression) -> str:
+        if node.is_inline_array:                       # [1, 2, 3]
+                items = ", ".join(self._txt(c) for c in node.components)
+                return f"{{{items}}}"
+        if len(node.components) == 1:                  # (a + b)
+            return f"({self._txt(node.components[0])})"
+        return f"/* TODO tupla: {node.source} */"   # 2+ componentes: lo interpreta la sentencia
 
     def _tr_BinaryOperation(self, node: ir.BinaryOperation) -> str:
         left = self._txt(node.left_expression)
@@ -206,7 +305,10 @@ class SolidityToCPrinter(Printer):
         return f"{node.operator.value}{sub_expr}"
 
     def _tr_ExpressionStatement(self, node: ir.ExpressionStatement) -> List[str]:
-        return [f"{self._txt(node.expression)};"]
+        expr = node.expression
+        if isinstance(expr, ir.Assignment) and isinstance(expr.left_expression, ir.TupleExpression):
+            return self._tuple_assign(expr)
+        return [f"{self._txt(expr)};"]
 
     def _tr_VariableDeclarationStatement(self, node: ir.VariableDeclarationStatement) -> List[str]:
         decls = [d for d in node.declarations if d is not None]
@@ -215,9 +317,12 @@ class SolidityToCPrinter(Printer):
             if node.initial_value is not None:
                 line += f" = {self._txt(node.initial_value)}"
             return [line + ";"]
+        # Tupla: se declaran todas las variables (las dejamos visibles después) y el
+        # reparto va en un bloque { } aparte, que solo aísla los temporales.
         out = [f"{self._decl(d)};" for d in decls]
         if node.initial_value is not None:
-            out.append(f"/* TODO tupla: {node.source} */")
+            targets = [None if d is None else (d.name, d.type_string) for d in node.declarations]
+            out += self._tuple_distribute(targets, node.initial_value, node.source)
         return out
 
     def _tr_Return(self, node: ir.Return) -> List[str]:
@@ -310,6 +415,7 @@ class SolidityToCPrinter(Printer):
             return []
 
         fname = f"{contract.name}_{node.name}"
+
         rets = node.return_parameters.parameters
         out: List[str] = []
 
@@ -319,14 +425,9 @@ class SolidityToCPrinter(Printer):
             ret_type = c_type(rets[0].type_string)
         else:
             ret_type = f"ret_{fname}"
-            out.append(f"typedef struct {ret_type} {{")
-            out += [f"{INDENT}{c_type(r.type_string)} {self._ret_name(r, i)};"
-                    for i, r in enumerate(rets)]
-            out.append(f"}} {ret_type};\n")
-
         params = [f"{contract.name} *self"] + [self._decl(p) for p in node.parameters.parameters]
         out.append(f"{ret_type} {fname}({', '.join(params)}) {{")
-
+        
         # Prólogo: retornos con nombre = locales con valor por defecto
         if len(rets) == 1 and rets[0].name:
             out.append(f"{INDENT}{ret_type} {rets[0].name} = 0;")
@@ -350,14 +451,44 @@ class SolidityToCPrinter(Printer):
         out.append("}\n")
         return out
 
+    def _funct_decl(self, node: ir.FunctionDefinition) -> List[str]:
+        contract = node.parent
+        if node.kind != ir.enums.FunctionKind.FUNCTION:
+            return []
+        if not isinstance(contract, ir.ContractDefinition):
+            return []
+
+        fname = f"{contract.name}_{node.name}"
+
+        rets = node.return_parameters.parameters
+        func_decl: List[str] = []
+
+        if len(rets) == 0:
+            ret_type = "void"
+        elif len(rets) == 1:
+            ret_type = c_type(rets[0].type_string)
+        else: 
+            ret_type = f"ret_{fname}"
+            func_decl.append(f"typedef struct {ret_type} {{")
+            func_decl += [f"{INDENT}{c_type(r.type_string)} {self._ret_name(r, i)};"
+                    for i, r in enumerate(rets)]
+            func_decl.append(f"}} {ret_type};\n")
+
+        params = [f"{contract.name} *self"] + [self._decl(p) for p in node.parameters.parameters]
+        func_decl.append(f"{ret_type} {fname}({', '.join(params)});\n")
+        return func_decl
+
     def print(self) -> None:
         # Fase 2: de más profundo a menos profundo
+
         for node in sorted(self._pending, key=depth_of, reverse=True):
             self._memo[id(node)] = getattr(self, f"_tr_{type(node).__name__}")(node)
- 
+
         for contract in self._contracts:
             lines = self._code[contract.source_unit.file]
             lines.extend(self._tr_ContractDefinition(contract))
+            for fn in self._functions[id(contract)]:
+                lines.extend(self._funct_decl(fn))
             for fn in self._functions[id(contract)]:
                 lines.extend(self._tr_FunctionDefinition(fn))
  
